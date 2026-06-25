@@ -3194,7 +3194,16 @@
     if (!firebaseRef) return;
     if (pushInFlight) { syncPending = true; return; }
     pushInFlight = true;
-    try { await firebaseRef.set(state); lastSyncOk = true; } catch { lastSyncOk = false; }
+    try {
+      await firebaseRef.set(state);
+      lastSyncOk = true;
+    } catch (err) {
+      lastSyncOk = false;
+      // Surface permission errors — most common cause is expired Firebase test-mode rules
+      if (err && err.code === 'PERMISSION_DENIED') {
+        console.warn('Firebase sync: permission denied. Check your Realtime Database rules in the Firebase console.');
+      }
+    }
     pushInFlight = false; updateSyncBtn();
     if (syncPending) { syncPending = false; syncPush(); }
   }
@@ -3249,7 +3258,7 @@
     if (firebaseConfig) {
       dv.style.display = 'none'; cv.style.display = '';
       document.getElementById('sync-id-display').textContent   = firebaseConfig.projectId || '(unknown)';
-      document.getElementById('sync-status-text').textContent  = lastSyncOk === null ? 'Connecting…' : lastSyncOk ? 'Live sync active' : 'Sync error';
+      document.getElementById('sync-status-text').textContent  = lastSyncOk === null ? 'Connecting…' : lastSyncOk ? 'Live sync active' : 'Sync error — check Firebase rules (may have expired)';
       document.getElementById('sync-modal-actions').innerHTML  = '<button class="btn-danger" onclick="disconnectFirebase()">Disconnect</button><button class="btn-secondary" onclick="closeSyncModal()">Close</button>';
     } else {
       dv.style.display = ''; cv.style.display = 'none';
