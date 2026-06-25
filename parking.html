@@ -741,9 +741,9 @@
 
     .street-lane { fill: none; stroke-linecap: round; stroke-linejoin: round; }
     .street-lane.unconfigured { stroke: #6a7280; stroke-width: 2.5; }
-    .street-lane.safe         { stroke: #22c55e; stroke-width: 3; }
+    .street-lane.safe-long    { stroke: #1e8a45; stroke-width: 3; }
+    .street-lane.safe         { stroke: #86efac; stroke-width: 3; }
     .street-lane.warn         { stroke: #eab308; stroke-width: 3; }
-    .street-lane.urgent       { stroke: #f97316; stroke-width: 3; }
     .street-lane.danger       { stroke: #ef4444; stroke-width: 3; }
 
     /* invisible wide hit area between the two lanes */
@@ -978,10 +978,10 @@
         <svg id="street-svg" xmlns="http://www.w3.org/2000/svg"></svg>
       </div>
       <div id="map-legend">
-        <div class="legend-item"><span class="legend-dot" style="background:#22c55e"></span>2d+ safe</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#1e8a45"></span>3d+ safe</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#86efac"></span>1–3 days</div>
         <div class="legend-item"><span class="legend-dot" style="background:#eab308"></span>&lt;24h</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#f97316"></span>&lt;3h</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>overdue</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>No parking / active</div>
         <div class="legend-item"><span class="legend-dot" style="background:#94a3b8"></span>not set</div>
       </div>
       <div id="map-zoom-btns">
@@ -1377,7 +1377,9 @@
   }
 
   function computeMustMoveBy(side) {
-    if (!side || !side.cleaning || side.cleaning.length === 0) {
+    if (!side) return { mustMoveBy: null, activeNow: false, noSchedule: true };
+    if (side.noParking) return { mustMoveBy: new Date(), activeNow: true, noSchedule: false };
+    if (!side.cleaning || side.cleaning.length === 0) {
       return { mustMoveBy: null, activeNow: false, noSchedule: true };
     }
     const now = new Date();
@@ -1390,6 +1392,7 @@
 
   function safeMinutes(side, now) {
     now = now || new Date();
+    if (side.noParking) return 0;
     if (!side.cleaning || side.cleaning.length === 0) return Infinity;
     if (side.cleaning.find(w => isWindowActive(w, now))) return 0;
     const nexts = side.cleaning.map(w => nextWindowStart(w, now));
@@ -1832,12 +1835,13 @@
     const key  = blockKey(streetName, segIndex, side);
     const blk  = state.blocks.find(b => b.key === key);
     if (!blk || !blk.sides || blk.sides.length === 0) return '#94a3b8';
-    const s    = blk.sides[0]; // only one side per block entry
+    const s = blk.sides[0];
+    if (s.noParking) return '#ef4444';
     const mins = safeMinutes(s, new Date());
-    if (mins === 0)     return '#ef4444';
-    if (mins < 180)     return '#f97316';
-    if (mins < 1440)    return '#eab308';
-    return '#22c55e';
+    if (mins === 0)      return '#ef4444';   // cleaning active
+    if (mins < 1440)     return '#eab308';   // < 1 day
+    if (mins < 4320)     return '#86efac';   // 1–3 days (very light green)
+    return '#1e8a45';                        // 3+ days (very dark green)
   }
 
   // ── SVG rendering ────────────────────────────────────────────────────────────
@@ -2075,7 +2079,8 @@
 
   function hasSchedule(streetName, segIndex, side) {
     const blk = state.blocks.find(b => b.key === blockKey(streetName, segIndex, side));
-    return blk && blk.sides && blk.sides[0] && blk.sides[0].cleaning && blk.sides[0].cleaning.length > 0;
+    return blk && blk.sides && blk.sides[0] &&
+      (blk.sides[0].noParking || (blk.sides[0].cleaning && blk.sides[0].cleaning.length > 0));
   }
 
   function showActionPopup(cx, cy, streetName, segIndex, side, dir, lanePts) {
@@ -2242,6 +2247,7 @@
 
     save(); render(); refreshParkedIcons();
     const sideData = blk.sides[0];
+    if (sideData && sideData.noParking) { closeParkPosModal(); return; }
     const { mustMoveBy, activeNow, noSchedule } = computeMustMoveBy(sideData);
     if (!noSchedule && !activeNow && mustMoveBy) {
       showReminderOffer(mustMoveBy, parkPosVehicleId);
@@ -2365,8 +2371,9 @@
     if (!el) return;
     const cls = color === '#94a3b8' ? 'unconfigured'
               : color === '#ef4444' ? 'danger'
-              : color === '#f97316' ? 'urgent'
               : color === '#eab308' ? 'warn'
+              : color === '#86efac' ? 'safe'
+              : color === '#1e8a45' ? 'safe-long'
               : 'safe';
     el.className.baseVal = 'street-lane ' + cls;
   }
@@ -2498,22 +2505,37 @@
   // Each tap on a lane opens a modal scoped to that specific street segment + side.
   // state.blocks entries now use a `key` field (blockKey) instead of a street name.
 
-  let editingSegKey    = null; // blockKey string
-  let editorWindows    = {};   // { [side]: [{days,startHour,...}] }
+  let editingSegKey      = null;
+  let editorWindows      = {};
+  let _editorNoParking   = false;
 
   function openBlockSegModal(streetName, segIndex, side, dir) {
     editingSegKey = blockKey(streetName, segIndex, side);
     const existing  = state.blocks.find(b => b.key === editingSegKey);
-    const scheduled = existing && existing.sides && existing.sides[0] && existing.sides[0].cleaning && existing.sides[0].cleaning.length > 0;
+    const sideData  = existing && existing.sides && existing.sides[0];
+    const scheduled = sideData && (sideData.noParking || (sideData.cleaning && sideData.cleaning.length > 0));
     const blockLabel = ' (block ' + (segIndex + 1) + ')';
+
+    _editorNoParking = !!(sideData && sideData.noParking);
 
     document.getElementById('block-modal-title').textContent       = scheduled ? 'Edit Schedule' : 'Set Up Schedule';
     document.getElementById('block-modal-street-name').textContent = streetName + ' — ' + side + ' side' + blockLabel;
     document.getElementById('block-modal-delete-row').style.display = scheduled ? 'block' : 'none';
 
     editorWindows = {};
-    if (existing && existing.sides && existing.sides.length > 0) {
-      editorWindows[side] = existing.sides[0].cleaning.map(w => ({ ...w }));
+    if (sideData && sideData.cleaning && sideData.cleaning.length > 0) {
+      // Re-group split multi-day entries (one per dayOfWeek) back into combined windows
+      const grouped = {};
+      for (const w of sideData.cleaning) {
+        const key = w.startHour + '-' + w.endHour;
+        if (!grouped[key]) grouped[key] = { ...w, days: [] };
+        grouped[key].days.push(w.dayOfWeek);
+      }
+      editorWindows[side] = Object.values(grouped).map(g => ({
+        days: g.days.sort((a,b)=>a-b), dayOfWeek: g.days[0],
+        startHour: g.startHour, startMin: g.startMin || 0,
+        endHour: g.endHour, endMin: g.endMin || 0,
+      }));
     } else {
       editorWindows[side] = [];
     }
@@ -2534,6 +2556,8 @@
 
     document.getElementById('block-step-sides').style.display   = 'none';
     document.getElementById('block-step-windows').style.display = 'block';
+    const deleteBtn = document.querySelector('#block-modal-delete-row .btn-danger');
+    if (deleteBtn) deleteBtn.textContent = _editorNoParking ? 'Remove no-parking mark' : 'Remove schedule';
     renderSegWindowsStep(side);
     document.getElementById('block-modal-overlay').classList.remove('hidden');
   }
@@ -2552,34 +2576,47 @@
     openParkPosModal({ streetName, segIndex, side, dir: street.dir, lanePts }, vehicleId);
   }
 
-  function closeBlockModal() { document.getElementById('block-modal-overlay').classList.add('hidden'); }
+  function closeBlockModal() {
+    document.getElementById('block-modal-overlay').classList.add('hidden');
+    _editorNoParking = false;
+  }
 
   // Render windows editor. Shows previous-schedule chips, then existing windows, then add button.
   function renderSegWindowsStep(side) {
     const container = document.getElementById('block-windows-editor');
     if (!editorWindows[side]) editorWindows[side] = [];
 
-    // Collect schedules from ALL blocks (including current) — group by startHour+endHour
-    // to re-combine split multi-day entries back into a single window.
-    // Show the 2 most recently saved unique patterns.
-    const grouped = {}; // key: "startH-endH" → { days: Set, startHour, endHour, ... }
+    // Collect distinct schedules from ALL blocks — re-group each block's cleaning
+    // entries by startHour+endHour (to undo the per-day expansion done by saveBlock),
+    // then dedupe across blocks by a stable key. Show last 2 unique patterns.
+    const seen = new Set();
+    const prevSchedules = [];
     for (const blk of state.blocks) {
       for (const s of (blk.sides || [])) {
-        for (const w of (s.cleaning || [])) {
-          const timeKey = w.startHour + '-' + w.endHour;
-          if (!grouped[timeKey]) grouped[timeKey] = { days: new Set(), startHour: w.startHour, startMin: w.startMin||0, endHour: w.endHour, endMin: w.endMin||0 };
-          const day = w.dayOfWeek !== undefined ? w.dayOfWeek : (Array.isArray(w.days) ? w.days[0] : 1);
-          grouped[timeKey].days.add(day);
+        if (!s.cleaning || !s.cleaning.length) continue;
+        // Re-group this side's cleaning entries
+        const grouped = {};
+        for (const w of s.cleaning) {
+          const k = w.startHour + '-' + w.endHour;
+          if (!grouped[k]) grouped[k] = { days: [], startHour: w.startHour, startMin: w.startMin||0, endHour: w.endHour, endMin: w.endMin||0 };
+          grouped[k].days.push(w.dayOfWeek);
+        }
+        for (const g of Object.values(grouped)) {
+          g.days.sort((a,b)=>a-b);
+          const dedupeKey = g.days.join(',') + ':' + g.startHour + '-' + g.endHour;
+          if (!seen.has(dedupeKey)) {
+            seen.add(dedupeKey);
+            prevSchedules.push(g);
+          }
         }
       }
     }
-    const prevSchedules = Object.values(grouped)
-      .map(g => ({ ...g, days: [...g.days].sort((a,b)=>a-b) }))
-      .slice(-2); // last 2
+    // Keep last 2
+    const recentTwo = prevSchedules.slice(-2);
 
     let prevHTML = '';
-    if (prevSchedules.length > 0) {
-      const chips = prevSchedules.map((w, i) => {
+    if (recentTwo.length > 0) {
+      const chips = recentTwo.map((w, i) => {
         const dayLabels = w.days.map(d => DAYS[d]).join('+');
         const startLbl = w.startHour < 12 ? w.startHour+'am' : w.startHour===12 ? '12pm' : (w.startHour-12)+'pm';
         const endLbl   = w.endHour   < 12 ? w.endHour  +'am' : w.endHour  ===12 ? '12pm' : (w.endHour  -12)+'pm';
@@ -2592,7 +2629,22 @@
     }
 
     // Store so applyPrevSchedule can access them
-    renderSegWindowsStep._prev = prevSchedules;
+    renderSegWindowsStep._prev = recentTwo;
+
+    // No Parking Anytime toggle — always shown at top
+    const noParkStyle = _editorNoParking
+      ? 'width:100%;margin-bottom:12px;min-height:44px;background:#ef4444;border-color:#ef4444;color:#fff'
+      : 'width:100%;margin-bottom:12px;min-height:44px';
+    const noParkBtn = '<button class="' + (_editorNoParking ? 'action-btn' : 'btn-secondary') +
+      '" style="' + noParkStyle + '"' +
+      ' onclick="toggleNoParking(\'' + side + '\')">' +
+      (_editorNoParking ? '🚫 No Parking Anytime (tap to remove)' : '🚫 Mark as No Parking Anytime') +
+      '</button>';
+
+    if (_editorNoParking) {
+      container.innerHTML = noParkBtn;
+      return;
+    }
 
     // Auto-open one blank window when there's no schedule yet
     if (editorWindows[side].length === 0) {
@@ -2600,9 +2652,15 @@
     }
 
     const winHTML = editorWindows[side].map((w, wi) => buildWindowRow(side, wi, w)).join('');
-    container.innerHTML = prevHTML + winHTML +
+    container.innerHTML = noParkBtn + prevHTML + winHTML +
       '<button class="btn-ghost" style="font-size:13px;padding:8px 0;margin-top:4px;width:100%;text-align:left" ' +
       'onclick="addWindowForSide(\'' + side + '\')">+ Add cleaning window</button>';
+  }
+
+  function toggleNoParking(side) {
+    _editorNoParking = !_editorNoParking;
+    if (_editorNoParking) editorWindows[side] = []; // clear windows when marking no-parking
+    renderSegWindowsStep(side);
   }
 
   function applyPrevSchedule(side, idx) {
@@ -2641,7 +2699,7 @@
 
   // Single grid: 7am–4pm. State tracked in w.startHour / w.endHour.
   // First tap = start, second tap = end. Clicking start again resets.
-  const HOURS = [7,8,9,10,11,12,13,14,15,16];
+  const HOURS = [6,7,8,9,10,11,12,13,14,15,16];
 
   function buildHourRangeBtns(side, wi, startH, endH) {
     return HOURS.map(h => {
@@ -2721,7 +2779,7 @@
       const days = Array.isArray(w.days) ? w.days : [w.dayOfWeek];
       for (const d of days) cleaning.push({ dayOfWeek: d, startHour: w.startHour, startMin: w.startMin || 0, endHour: w.endHour, endMin: w.endMin || 0 });
     }
-    const sideObj = { id: uid(), label: side, cleaning };
+    const sideObj = { id: uid(), label: side, cleaning, noParking: _editorNoParking || false };
     const existing = state.blocks.find(b => b.key === editingSegKey);
     const blockData = {
       key: editingSegKey,
@@ -3034,7 +3092,7 @@
 
   function closeSidePicker() {
     document.getElementById('side-picker-overlay').classList.add('hidden');
-    pendingParkEvent = null; pickedSideId = null; _geoSideMap = {};
+    pendingParkEvent = null; pickedSideId = null; _geoSideMap = {}; _candidateGeos = [];
   }
 
   function confirmSidePicker() {
@@ -3122,8 +3180,14 @@
   // ── FIREBASE SYNC ────────────────────────────────────────────────────────────
 
   function stateFingerprint(s) {
-    return (s.events||[]).map(e => e.id+':'+e.vehicleId+':'+e.sideId+':'+e.parkedAt).sort().join('|') + '@@' +
-           (s.blocks||[]).map(b => b.id).sort().join('|');
+    const evts = (s.events||[]).map(e => e.id+':'+e.vehicleId+':'+e.sideId+':'+e.parkedAt).sort().join('|');
+    const blks = (s.blocks||[]).map(b => {
+      const s0 = b.sides && b.sides[0];
+      const cleaning = s0 ? (s0.cleaning||[]).map(w=>w.dayOfWeek+':'+w.startHour+'-'+w.endHour).sort().join(',') : '';
+      const np = s0 && s0.noParking ? '1' : '0';
+      return b.id + ':' + np + ':' + cleaning;
+    }).sort().join('|');
+    return evts + '@@' + blks;
   }
 
   async function syncPush() {
@@ -3278,13 +3342,12 @@
 
   // ── Initial render ───────────────────────────────────────────────────────────
   render();
+  // Capture park-pos-modal HTML immediately after render — must be before deep-link IIFE
+  const _parkPosSheetHTML = document.querySelector('#park-pos-modal .modal-sheet').innerHTML;
   populateShortcutURLs();
-  // Capture original park-pos-modal sheet HTML for restoration after reminder offer
   // Blocks is the default tab — build SVG immediately and fit once layout is ready
   renderBlocksTab();
   setTimeout(initMapFit, 50);
-  // Capture park-pos-modal HTML after all rendering is done
-  const _parkPosSheetHTML = document.querySelector('#park-pos-modal .modal-sheet').innerHTML;
   updateSyncBtn();
   if (firebaseConfig) {
     initFirebase(firebaseConfig)
